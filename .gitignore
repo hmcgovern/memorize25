@@ -1,0 +1,10 @@
+custom.py
+local
+.sconsign.dblite
+*~
+*#
+#*
+.#*
+
+wandb
+work
