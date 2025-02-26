@@ -7,6 +7,7 @@ import evaluate
 import torch
 import numpy as np
 from pynvml import *
+import wandb
 import gc
 gc.collect()
 torch.cuda.empty_cache()
@@ -25,8 +26,6 @@ def print_summary(result):
     print_gpu_utilization()
 
 
-# this is a script to finetune meta-llama/Llama-3.1-8B on the dataset "paradise_lost".
-
 os.environ["WANDB_PROJECT"] = "LLM Memorization"
 # os.environ["WANDB_MODE"] = "offline"
 # ppl = evaluate.load("perplexity", module_type='metric')
@@ -37,6 +36,8 @@ class PerplexityCallback(TrainerCallback):
             loss = logs["loss"]
             perplexity = np.exp(loss)
             print(f"Step {state.global_step}: Train Perplexity = {perplexity:.4f}")
+            # log to wandb
+            wandb.log({"train_perplexity": perplexity})
 
 
 def main(args, rest):
@@ -45,85 +46,90 @@ def main(args, rest):
     with open(args.dataset, "r") as f:
         input_text = f.read()
 
-    def chunk_text(text, chunk_size=512, overlap=128):
-        """
-        Splits text into overlapping chunks.
-        
-        Args:
-            text (str): The input text to be chunked.
-            chunk_size (int): The size of each chunk.
-            overlap (int): The number of overlapping tokens between chunks.
 
-        Returns:
-            List[str]: A list of overlapping text chunks.
-        """
-        chunks = []
-        start = 0
-        while start < len(text):
-            end = start + chunk_size
-            chunks.append(text[start:end])
-            start += chunk_size - overlap  # Move forward with overlap
-        
-        return chunks
+    train_dataset = datasets.Dataset.from_dict({"text": [input_text]})
 
-    chunks = chunk_text(input_text)
-
-    train_dataset = datasets.Dataset.from_dict({"text": chunks})
   
     model = utils.load_llm(args.model_name, qlora=False, from_init=False)
     # model = torch.compile(model)
     model.config.use_cache = False
     tok = utils.load_tokenizer(args.model_name)
     print_gpu_utilization()
-    # exit()
+ 
     
     def tokenize(example):
-        return tok(example['text'])
+        return tok(example['text'], padding="max_length", max_length=1024)
+    
+    def chunk(examples):
+        # want to chunk the text into 2048 character blocks, with a stride of 2000
+        stride = 2000
+        length = 2048
+        chunks = []
+        for text in examples['text']: # there will only be 1 example
+            for i in range(0, len(text), stride):
+                chunks.append(text[i:i+length])
+        return {"text": chunks}
+    
     
     def shift_input_ids(example):
         # Shift the input_ids by one to create labels
         example['labels'] = example['input_ids'][1:] + [example['input_ids'][-1]]  # Shift and pad with the last token
         return example
     
+
+    train_dataset = train_dataset.map(chunk, batched=True)
     train_dataset = train_dataset.map(tokenize)
     train_dataset = train_dataset.map(shift_input_ids)
     print(train_dataset)
-  
+
     
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
+
+        # Convert logits and labels to PyTorch tensors if they are not already
+        if isinstance(logits, tuple):
+            logits = logits[0]  # Extract the first element from the tuple (if necessary)
+            logits = torch.tensor(logits)  # Convert NumPy array to PyTorch tensor
+
+        if isinstance(labels, np.ndarray):
+            labels = torch.tensor(labels)  # Convert NumPy array to PyTorch tensor
+
         loss_fct = torch.nn.CrossEntropyLoss()
-        
-        # Convert logits to probabilities
-        logits = torch.tensor(logits)
-        labels = torch.tensor(labels)
-        
+
+        # Shift logits and labels for causal language modeling
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
-        
+
+        # Compute the loss
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        
+
+        # Compute perplexity
         perplexity = torch.exp(loss)
-        
+
         return {"perplexity": perplexity.item()}
+
 
     training_args = TrainingArguments(
         output_dir='model',
         eval_strategy="steps",  # Evaluate every N steps
-        eval_steps=100,
+        eval_steps=10,
+        gradient_accumulation_steps=10,
+        eval_accumulation_steps=10,
         load_best_model_at_end=True,
-        gradient_accumulation_steps=300,
-        save_total_limit=1,
         metric_for_best_model="perplexity",
+        greater_is_better=False,
+        save_total_limit=1,
+        save_steps=10,
         report_to="wandb",
         save_strategy="steps",
         logging_dir="./logs",
-        logging_steps=100,
+        logging_steps=10,
         per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
-        num_train_epochs=1_000,  # Train until very low perplexity
+        per_device_eval_batch_size=2,
+        num_train_epochs=100,  # Train until very low perplexity
         optim="adamw_8bit", #quantized optimizer
         remove_unused_columns=False,
+        bf16=True,
         gradient_checkpointing=True,
         run_name="llm-paradise-lost",
     )
@@ -131,8 +137,8 @@ def main(args, rest):
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=train_dataset,  # Same dataset for evaluation
+        train_dataset=train_dataset,  # Only use 400 chunks for training
+        eval_dataset=train_dataset.select(range(30)),  # Same dataset for evaluation
         compute_metrics=compute_metrics,
     )
 
