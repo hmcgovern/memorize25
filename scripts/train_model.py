@@ -7,6 +7,10 @@ import evaluate
 import torch
 import numpy as np
 from pynvml import *
+import gc
+gc.collect()
+torch.cuda.empty_cache()
+torch.cuda.reset_peak_memory_stats()
 
 def print_gpu_utilization():
     nvmlInit()
@@ -41,8 +45,31 @@ def main(args, rest):
     with open(args.dataset, "r") as f:
         input_text = f.read()
 
-    train_dataset = datasets.Dataset.from_dict({"text": [input_text]})
+    def chunk_text(text, chunk_size=512, overlap=128):
+        """
+        Splits text into overlapping chunks.
+        
+        Args:
+            text (str): The input text to be chunked.
+            chunk_size (int): The size of each chunk.
+            overlap (int): The number of overlapping tokens between chunks.
 
+        Returns:
+            List[str]: A list of overlapping text chunks.
+        """
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = start + chunk_size
+            chunks.append(text[start:end])
+            start += chunk_size - overlap  # Move forward with overlap
+        
+        return chunks
+
+    chunks = chunk_text(input_text)
+
+    train_dataset = datasets.Dataset.from_dict({"text": chunks})
+  
     model = utils.load_llm(args.model_name, qlora=False, from_init=False)
     # model = torch.compile(model)
     model.config.use_cache = False
@@ -53,7 +80,15 @@ def main(args, rest):
     def tokenize(example):
         return tok(example['text'])
     
+    def shift_input_ids(example):
+        # Shift the input_ids by one to create labels
+        example['labels'] = example['input_ids'][1:] + [example['input_ids'][-1]]  # Shift and pad with the last token
+        return example
+    
     train_dataset = train_dataset.map(tokenize)
+    train_dataset = train_dataset.map(shift_input_ids)
+    print(train_dataset)
+  
     
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
@@ -77,6 +112,7 @@ def main(args, rest):
         eval_strategy="steps",  # Evaluate every N steps
         eval_steps=100,
         load_best_model_at_end=True,
+        gradient_accumulation_steps=300,
         save_total_limit=1,
         metric_for_best_model="perplexity",
         report_to="wandb",
@@ -89,6 +125,7 @@ def main(args, rest):
         optim="adamw_8bit", #quantized optimizer
         remove_unused_columns=False,
         gradient_checkpointing=True,
+        run_name="llm-paradise-lost",
     )
 
     trainer = Trainer(
