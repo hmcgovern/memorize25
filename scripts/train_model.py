@@ -6,24 +6,14 @@ import utils
 import evaluate
 import torch
 import numpy as np
-from pynvml import *
+from utils import print_gpu_utilization, print_summary
 import wandb
 import gc
+
 gc.collect()
 torch.cuda.empty_cache()
 torch.cuda.reset_peak_memory_stats()
 
-def print_gpu_utilization():
-    nvmlInit()
-    handle = nvmlDeviceGetHandleByIndex(0)
-    info = nvmlDeviceGetMemoryInfo(handle)
-    print(f"GPU memory occupied: {info.used//1024**2} MB.")
-
-
-def print_summary(result):
-    print(f"Time: {result.metrics['train_runtime']:.2f}")
-    print(f"Samples/second: {result.metrics['train_samples_per_second']:.2f}")
-    print_gpu_utilization()
 
 
 os.environ["WANDB_PROJECT"] = "LLM Memorization"
@@ -76,13 +66,11 @@ def main(args, rest):
         example['labels'] = example['input_ids'][1:] + [example['input_ids'][-1]]  # Shift and pad with the last token
         return example
     
-
     train_dataset = train_dataset.map(chunk, batched=True)
     train_dataset = train_dataset.map(tokenize)
     train_dataset = train_dataset.map(shift_input_ids)
     print(train_dataset)
-
-    
+ 
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
 
@@ -110,22 +98,16 @@ def main(args, rest):
 
 
     training_args = TrainingArguments(
-        output_dir='model',
-        eval_strategy="steps",  # Evaluate every N steps
-        eval_steps=10,
+        output_dir="model",
+        eval_strategy="no",  # Evaluate every N steps
         gradient_accumulation_steps=10,
-        eval_accumulation_steps=10,
-        load_best_model_at_end=True,
-        metric_for_best_model="perplexity",
-        greater_is_better=False,
-        save_total_limit=1,
+        save_total_limit=2,
         save_steps=10,
         report_to="wandb",
         save_strategy="steps",
         logging_dir="./logs",
         logging_steps=10,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=2,
+        per_device_train_batch_size=8,
         num_train_epochs=100,  # Train until very low perplexity
         optim="adamw_8bit", #quantized optimizer
         remove_unused_columns=False,
@@ -138,7 +120,7 @@ def main(args, rest):
         model=model,
         args=training_args,
         train_dataset=train_dataset,  # Only use 400 chunks for training
-        eval_dataset=train_dataset.select(range(30)),  # Same dataset for evaluation
+        eval_dataset=None,  
         compute_metrics=compute_metrics,
     )
 

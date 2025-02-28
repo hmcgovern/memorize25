@@ -10,6 +10,7 @@ import functools
 import time
 # import imp
 import sys
+from dirhash import dirhash
 # from steamroller import Environment
 
 
@@ -25,16 +26,15 @@ import sys
 vars = Variables("custom.py")
 # "meta-llama/Llama-3.1-8B"
 vars.AddVariables(
-    ("MODEL", "", "meta-llama/Llama-3.2-3B-Instruct"),
+    ("MODEL", "", "meta-llama/Llama-3.1-8B"),
     ("DATASETS", "", {"paradise_lost" : "data/paradise_lost.txt.gz",
                     # "inferno": "data/dante.txt"
                       }),
+    ("TRAINED_MODEL", "", "model/checkpoint-160")
     # ("SLURM_ENGINE", "", "slurm"),
     # ("CPU_QUEUE", "", "some_queue"),
     # ("CPU_ACCOUNT", "", "some_account"),    
-    ("GPU_QUEUE", "", "another_queue"),
-    ("GPU_ACCOUNT", "", "another_account"),
-    ("GPU_COUNT", "", 1),
+
 )
 
 # Methods on the environment object are used all over the place, but it mostly serves to
@@ -50,16 +50,16 @@ env = Environment(
     # automatically populate MODEL_TYPE, we'll do this with for-loops).
     BUILDERS={
         "UnzipData" : Builder(
-            action="gunzip -c ${SOURCES[0]} > ${TARGETS[0]}"
+            action="python3 scripts/unzip.py --input ${SOURCE} --output ${TARGET}"
         ),
-        "PreprocessData" : Builder(
-            action="python3 scripts/preprocess_data.py --input ${SOURCES[0]} --outputs ${TARGETS[0]}"
-        ),
+        # "PreprocessData" : Builder(
+        #     action="python3 scripts/preprocess_data.py --input ${SOURCES[0]} --outputs ${TARGETS[0]}"
+        # ),
         "TrainModel" : Builder(
-            action="python3 scripts/train_model.py --model_name ${MODEL} --dataset ${SOURCE} --outputs ${TARGETS[0]}"            
+            action="accelerate launch scripts/train_model.py --model_name ${MODEL} --dataset ${SOURCE} --outputs ${TARGETS[0]}"            
         ),
-        "ApplyModel" : Builder(
-            action="python3 scripts/apply_model.py --model ${SOURCES[0]} --test ${SOURCES[1]} --outputs ${TARGETS[0]}"
+        "EvalModel" : Builder(
+            action="python3 scripts/eval_model.py --model_or_checkpoint_path ${SOURCES[0]} --test ${SOURCES[1]} --outputs ${TARGETS[0]}"
         ),
         # "GenerateReport" : Builder(
         #     action="python scripts/generate_report.py --experimental_results ${SOURCES} --outputs ${TARGETS[0]}"
@@ -89,6 +89,12 @@ env = Environment(
 # apply model is prompting the model with prompts from the test set, tracking generations
 # generate report will calculate various metrics, like verbatim recall. 
 
+
+def dir_timestamp(node, env):
+    return os.path.getmtime(node.abspath)
+
+
+
 results = []
 for dataset_name, dataset_file in env["DATASETS"].items():
     # if the dataset is gzipped, we need to unzip it first
@@ -96,11 +102,18 @@ for dataset_name, dataset_file in env["DATASETS"].items():
         dataset_file = env.UnzipData("work/${DATASET_NAME}/data.txt", dataset_file, DATASET_NAME=dataset_name)
 
 
-    model = env.TrainModel(
-        ["work/${DATASET_NAME}/model.bin"],
-        dataset_file,
-        MODEL=env["MODEL"],
+    # model = env.TrainModel(
+    #     ["work/${DATASET_NAME}/model.bin"],
+    #     dataset_file,
+    #     MODEL=env["MODEL"],
+    #     DATASET_NAME=dataset_name,
+    # )
+
+    evals = env.EvalModel(
+        "work/${DATASET_NAME}/eval.png",
+        [Dir(env["TRAINED_MODEL"]), dataset_file],
         DATASET_NAME=dataset_name,
+        target_scanner=Scanner(function=dir_timestamp, skeys=['.'])
     )
 
     # data = env.PreprocessData("work/${DATASET_NAME}/data.txt", dataset_file, DATASET_NAME=dataset_name)

@@ -10,6 +10,8 @@ if __name__ == "__main__":
     parser = ap.ArgumentParser()
     parser.add_argument("--model", type=str, default="gpt2")
     args = parser.parse_args()
+
+    # checking estimated GPU and GPU requirements for this model with DeepSpeed, assuming 1 node and 1 GPU
     model = AutoModel.from_pretrained(args.model)
     print(estimate_zero3_model_states_mem_needs_all_live(model, num_gpus_per_node=1, num_nodes=1))
 
