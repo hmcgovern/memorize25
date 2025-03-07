@@ -1,14 +1,16 @@
 import argparse
 import datasets
-from transformers import Trainer, TrainerCallback, TrainingArguments
+from transformers import Trainer, TrainerCallback, TrainingArguments, DataCollatorForLanguageModeling
 import os
 import utils
 import evaluate
 import torch
+from peft import get_peft_model, LoraConfig
 import numpy as np
 from pynvml import *
 import wandb
 import gc
+
 gc.collect()
 torch.cuda.empty_cache()
 torch.cuda.reset_peak_memory_stats()
@@ -27,8 +29,6 @@ def print_summary(result):
 
 
 os.environ["WANDB_PROJECT"] = "LLM Memorization"
-# os.environ["WANDB_MODE"] = "offline"
-# ppl = evaluate.load("perplexity", module_type='metric')
 
 class PerplexityCallback(TrainerCallback):
     def on_log(self, args, state, control, logs=None, **kwargs):
@@ -38,6 +38,14 @@ class PerplexityCallback(TrainerCallback):
             print(f"Step {state.global_step}: Train Perplexity = {perplexity:.4f}")
             # log to wandb
             wandb.log({"train_perplexity": perplexity})
+
+    def on_evaluate(self, args, state, control, logs=None, **kwargs):
+        if logs is not None and "eval_loss" in logs:
+            loss = logs["eval_loss"]
+            perplexity = np.exp(loss)
+            print(f"Step {state.global_step}: Eval Perplexity = {perplexity:.4f}")
+            # log to wandb
+            wandb.log({"eval_perplexity": perplexity})
 
 
 def main(args, rest):
@@ -51,19 +59,39 @@ def main(args, rest):
 
   
     model = utils.load_llm(args.model_name, qlora=False, from_init=False)
-    # model = torch.compile(model)
     model.config.use_cache = False
+
+    if args.lora:
+        # LoRA config
+        lora_config = LoraConfig(
+            r=16,  # Rank of update matrices
+            lora_alpha=32,
+            target_modules=["q_proj", "v_proj"],  # Adjust for specific architectures
+            lora_dropout=0.1,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+
+        # Apply LoRA
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+
+    device = torch.device("cuda")
+    model.to(device)
+    model.train()
+
+    # Load tokenizer
     tok = utils.load_tokenizer(args.model_name)
     print_gpu_utilization()
- 
+
     
     def tokenize(example):
-        return tok(example['text'], padding="max_length", max_length=1024)
+        return tok(example['text'])
     
     def chunk(examples):
         # want to chunk the text into 2048 character blocks, with a stride of 2000
-        stride = 2000
-        length = 2048
+        stride = 500
+        length = 512
         chunks = []
         for text in examples['text']: # there will only be 1 example
             for i in range(0, len(text), stride):
@@ -71,18 +99,18 @@ def main(args, rest):
         return {"text": chunks}
     
     
-    def shift_input_ids(example):
-        # Shift the input_ids by one to create labels
-        example['labels'] = example['input_ids'][1:] + [example['input_ids'][-1]]  # Shift and pad with the last token
-        return example
-    
-
     train_dataset = train_dataset.map(chunk, batched=True)
-    train_dataset = train_dataset.map(tokenize)
-    train_dataset = train_dataset.map(shift_input_ids)
-    print(train_dataset)
+    print(f"After chunking, {len(train_dataset)} examples in dataset")
 
-    
+
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tok,
+        mlm=False  # We don't want masked language modeling (MLM) for causal models
+    )
+
+    train_dataset = train_dataset.map(tokenize, batched=True, remove_columns=["text"])
+
+
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
 
@@ -109,40 +137,47 @@ def main(args, rest):
         return {"perplexity": perplexity.item()}
 
 
+    # if lora: gradient_accumulation_steps=1 and gradient_checkpointing=False
     training_args = TrainingArguments(
-        output_dir='model',
+        output_dir=args.outputs[0],
         eval_strategy="steps",  # Evaluate every N steps
         eval_steps=10,
         gradient_accumulation_steps=10,
-        eval_accumulation_steps=10,
-        load_best_model_at_end=True,
-        metric_for_best_model="perplexity",
-        greater_is_better=False,
-        save_total_limit=1,
+        eval_accumulation_steps=2,
+        save_total_limit=2,
         save_steps=10,
         report_to="wandb",
         save_strategy="steps",
         logging_dir="./logs",
         logging_steps=10,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=2,
-        num_train_epochs=100,  # Train until very low perplexity
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=1,
+        num_train_epochs=10,  # Train until very low perplexity
         optim="adamw_8bit", #quantized optimizer
         remove_unused_columns=False,
         bf16=True,
-        gradient_checkpointing=True,
-        run_name="llm-paradise-lost",
+        gradient_checkpointing=False,
+        run_name=args.run_name,
     )
+    # eval_steps=10,
+    # eval_accumulation_steps=10,
+    # load_best_model_at_end=True,
+    # metric_for_best_model="perplexity",
+    # greater_is_better=False,
+    wandb.init(project="LLM-Memorization", name=f"finetune-{args.model_name}")
 
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=train_dataset,  # Only use 400 chunks for training
-        eval_dataset=train_dataset.select(range(30)),  # Same dataset for evaluation
+        train_dataset=train_dataset, 
+        eval_dataset=train_dataset.select(range(20)),  # Evaluate on a subset of the training data
+        data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
 
     trainer.add_callback(PerplexityCallback())
+    trainer.add_callback(utils.WandbTextCompletionCallback(trainer = trainer, tokenizer=tok,eval_dataset=train_dataset.select(range(10))))
+    model.train()
     result = trainer.train()
     print_summary(result)
 
@@ -153,6 +188,8 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", dest="model_name", help="Model name")
     parser.add_argument("--dataset", dest="dataset", help="Dataset file")
     parser.add_argument("--outputs", dest="outputs", nargs="+", help="Output files")
+    parser.add_argument("--run_name", dest="run_name", help="Run name")
+    parser.add_argument("--lora", dest="lora", action="store_true", help="Use LoRA")
     args, rest = parser.parse_known_args()
 
     main(args, rest)
