@@ -10,6 +10,14 @@ import numpy as np
 from pynvml import *
 import wandb
 import gc
+import yaml
+import sys
+import os
+
+from callbacks import *
+
+from itertools import islice
+
 
 gc.collect()
 torch.cuda.empty_cache()
@@ -30,34 +38,51 @@ def print_summary(result):
 
 os.environ["WANDB_PROJECT"] = "LLM Memorization"
 
-class PerplexityCallback(TrainerCallback):
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        if logs is not None and "loss" in logs:
-            loss = logs["loss"]
-            perplexity = np.exp(loss)
-            print(f"Step {state.global_step}: Train Perplexity = {perplexity:.4f}")
-            # log to wandb
-            wandb.log({"train_perplexity": perplexity})
 
-    def on_evaluate(self, args, state, control, logs=None, **kwargs):
-        if logs is not None and "eval_loss" in logs:
-            loss = logs["eval_loss"]
-            perplexity = np.exp(loss)
-            print(f"Step {state.global_step}: Eval Perplexity = {perplexity:.4f}")
-            # log to wandb
-            wandb.log({"eval_perplexity": perplexity})
+def retrieve(attr, default):
+    val = getattr(args, attr)
+    return default if val == None else val
 
 
-def main(args, rest):
+def main(args):
+
     torch.cuda.empty_cache()
     print_gpu_utilization()
+    
     with open(args.dataset, "r") as f:
         input_text = f.read()
 
 
     train_dataset = datasets.Dataset.from_dict({"text": [input_text]})
 
-  
+    if getattr(args, 'general_domain')is not None and getattr(args, 'num_train_examples') is not None:
+        web_text = datasets.load_dataset(args.general_domain, split='train', streaming=True)
+        web_text = list(web_text.take(args.num_train_examples))
+        # Convert streaming dataset to a map-style dataset
+        web_text = datasets.Dataset.from_list(web_text) 
+        # Ensure only 'text' column is retained
+        web_text = web_text.remove_columns([col for col in web_text.column_names if col != "text"]) 
+        # # Concatenate datasets
+        train_dataset = datasets.concatenate_datasets([train_dataset, web_text]).shuffle(seed=42)
+    
+    # Load tokenizer
+    tok = utils.load_tokenizer(args.model_name)
+
+    def tokenize_and_chunk(examples, chunk_size):
+        # Tokenize the text and flatten into a single sequence
+        tokenized_text = tok(examples["text"], truncation=False)["input_ids"]
+        flat_tokens = sum(tokenized_text, [])  # Flatten list of lists
+
+        # Split into chunks of size `chunk_size`
+        chunks = [flat_tokens[i : i + chunk_size] for i in range(0, len(flat_tokens), chunk_size)]
+        
+        return {"input_ids": chunks}
+
+    # Apply processing
+    tokenized_dataset = train_dataset.map(tokenize_and_chunk, batched=True, remove_columns=["text"],
+                                    fn_kwargs={'chunk_size': retrieve('chunk_size', 1024)})
+
+
     model = utils.load_llm(args.model_name, qlora=False, from_init=False)
     model.config.use_cache = False
 
@@ -80,27 +105,8 @@ def main(args, rest):
     model.to(device)
     model.train()
 
-    # Load tokenizer
-    tok = utils.load_tokenizer(args.model_name)
+    
     print_gpu_utilization()
-
-    
-    def tokenize(example):
-        return tok(example['text'])
-    
-    def chunk(examples):
-        # want to chunk the text into 2048 character blocks, with a stride of 2000
-        stride = 500
-        length = 512
-        chunks = []
-        for text in examples['text']: # there will only be 1 example
-            for i in range(0, len(text), stride):
-                chunks.append(text[i:i+length])
-        return {"text": chunks}
-    
-    
-    train_dataset = train_dataset.map(chunk, batched=True)
-    print(f"After chunking, {len(train_dataset)} examples in dataset")
 
 
     data_collator = DataCollatorForLanguageModeling(
@@ -108,9 +114,7 @@ def main(args, rest):
         mlm=False  # We don't want masked language modeling (MLM) for causal models
     )
 
-    train_dataset = train_dataset.map(tokenize, batched=True, remove_columns=["text"])
-
-
+ 
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
 
@@ -137,46 +141,75 @@ def main(args, rest):
         return {"perplexity": perplexity.item()}
 
 
+    def calculate_eval_steps(num_examples, num_epochs, batch_size, grad_accum_steps):
+        """
+        Calculate eval_steps to ensure exactly 10 evaluation loops during training.
+        
+        Args:
+            num_examples (int): Total number of training examples
+            num_epochs (int): Number of training epochs
+            batch_size (int): Per-device training batch size
+            grad_accum_steps (int): Gradient accumulation steps
+            
+        Returns:
+            int: eval_steps value to ensure 10 evaluations per training run
+        """
+        total_steps = (num_examples * num_epochs) // (batch_size * grad_accum_steps)
+        eval_steps = max(1, total_steps // 10)  # Ensure at least 1 step
+        return eval_steps
+    
+
+    # retrieving some defaults
+    batch_size = retrieve('batch_size', 8)
+    gradient_accumulation_steps=retrieve('gradient_accumulation_steps', 10)
+    num_train_epochs = retrieve('num_train_epochs', 10)
+    eval_steps = calculate_eval_steps(len(tokenized_dataset), 
+                                      num_train_epochs, 
+                                      batch_size,
+                                      gradient_accumulation_steps)
+
+  
+    print(f"number of examples: {len(tokenized_dataset)}")
+    print(f"length of example: {len(tokenized_dataset[0]['input_ids'])}")
+    print(f"batch size: {batch_size} \t grad accum: {gradient_accumulation_steps} \t num_train: {num_train_epochs} \t eval steps: {eval_steps}")
+    print('--'*50)
+  
     # if lora: gradient_accumulation_steps=1 and gradient_checkpointing=False
     training_args = TrainingArguments(
         output_dir=args.outputs[0],
         eval_strategy="steps",  # Evaluate every N steps
-        eval_steps=10,
-        gradient_accumulation_steps=10,
+        eval_steps=eval_steps,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         eval_accumulation_steps=2,
-        save_total_limit=2,
+        save_total_limit=1,
         save_steps=10,
         report_to="wandb",
         save_strategy="steps",
         logging_dir="./logs",
         logging_steps=10,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=1,
-        num_train_epochs=10,  # Train until very low perplexity
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=2,
+        num_train_epochs=num_train_epochs,  # Train until very low perplexity
         optim="adamw_8bit", #quantized optimizer
         remove_unused_columns=False,
         bf16=True,
         gradient_checkpointing=False,
         run_name=args.run_name,
     )
-    # eval_steps=10,
-    # eval_accumulation_steps=10,
-    # load_best_model_at_end=True,
-    # metric_for_best_model="perplexity",
-    # greater_is_better=False,
+
     wandb.init(project="LLM-Memorization", name=f"finetune-{args.model_name}")
 
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=train_dataset, 
-        eval_dataset=train_dataset.select(range(20)),  # Evaluate on a subset of the training data
+        train_dataset=tokenized_dataset, 
+        eval_dataset=tokenized_dataset.select(range(retrieve('num_eval_samples', 20))),  # Evaluate on a subset of the training data
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
 
     trainer.add_callback(PerplexityCallback())
-    trainer.add_callback(utils.WandbTextCompletionCallback(trainer = trainer, tokenizer=tok,eval_dataset=train_dataset.select(range(10))))
+    trainer.add_callback(WandbTextCompletionCallback(trainer = trainer, tokenizer=tok,eval_dataset=tokenized_dataset.select(range(10))))
     model.train()
     result = trainer.train()
     print_summary(result)
@@ -184,16 +217,30 @@ def main(args, rest):
     
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--model_name", dest="model_name", help="Model name")
     parser.add_argument("--dataset", dest="dataset", help="Dataset file")
     parser.add_argument("--outputs", dest="outputs", nargs="+", help="Output files")
     parser.add_argument("--run_name", dest="run_name", help="Run name")
     parser.add_argument("--lora", dest="lora", action="store_true", help="Use LoRA")
+    parser.add_argument("--num_eval_samples")
+    parser.add_argument("--general_domain")
+    parser.add_argument("--num_train_examples")
+    parser.add_argument("--chunk_size")
+    parser.add_argument("--batch_size")
+    parser.add_argument("--gradient_accumulation_steps")
+    parser.add_argument("--num_train_epochs")
+
     args, rest = parser.parse_known_args()
 
-    main(args, rest)
-    # print("Building files {} from arguments {}".format(args.outputs, rest))
-    # for fname in args.outputs:
-    #     with open(fname, "wt") as ofd:
-    #         pass
+    # Load YAML config if provided
+    with open(rest[0], "r") as f:
+        yaml_config = yaml.safe_load(f)
+
+    # Override argparse defaults with YAML values
+    for key, value in yaml_config.items():
+        if hasattr(args, key):
+            setattr(args, key, value)
+
+    main(args)
+

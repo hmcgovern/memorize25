@@ -25,10 +25,13 @@ vars.AddVariables(
                     # "EleutherAI/gpt-neo-1.3B",
                     # "EleutherAI/gpt-j-6b"
                     ]),
-    ("DATASETS", "", {"paradise_lost" : "data/paradise_lost.txt.gz",
-                    # "inferno": "data/dante.txt"
+    ("DATASETS", "", {"paradise_lost" : "work/paradise_lost/paradise_lost.txt",
                       }),
-    ("MODELS_8B", "", ["meta-llama/Llama-3.1-8B"]),
+    ("CONFIGS", "", {"train": "configs/train",
+                     "eval": "configs/eval"}),
+    ("ABLATION_DEFAULTS", "", {'model':"meta-llama/Llama-3.2-1B",
+                               'dataset': "work/paradise_lost/paradise_lost.txt",
+                               'dataset_name': 'paradise_lost'}) 
 )
 
 # Methods on the environment object are used all over the place, but it mostly serves to
@@ -40,11 +43,12 @@ env = Environment(
             action="python3 scripts/unzip.py --input ${SOURCE} --output ${TARGET}"
         ),
         "TrainModel" : Builder(
-            action="accelerate launch scripts/train_model.py --model_name ${MODEL} --dataset ${SOURCE} --outputs ${TARGETS[0]}"            
+            action="accelerate launch scripts/train_model.py ${CONFIG} --model_name ${MODEL} --dataset ${SOURCES[0]} --outputs ${TARGETS[0]}"            
         ),
         "CleanEval": Builder(
              action="python3 scripts/clean_eval.py --model ${MODEL} --data ${SOURCES[0]} --output ${TARGETS[0]}"
-        )
+        ),
+        # we will need one for splitting the text into scenes
     }
 )
 
@@ -56,6 +60,41 @@ def dir_timestamp(node, env):
 # N.B. we pass this either to source_scanner or target_scanner when source or target is a directory.
 scan_timestamp = Scanner(function=dir_timestamp, skeys=['.'])
 
+################ MODEL ABLATIONS ################
+# conducting a series of tests for 
+
+model = env['ABLATION_DEFAULTS'].get('model', None)
+dataset_file = env['ABLATION_DEFAULTS'].get('dataset', None)
+dataset_name = env['ABLATION_DEFAULTS'].get('dataset_name', None)
+if model != None and dataset_file != None:
+    ablations = []
+    work_dir = Dir(f"work/{dataset_name}")
+
+    for train_config_file in os.listdir(env["CONFIGS"].get('train', [])):
+        if train_config_file.endswith('.yaml'):
+
+            config_name = os.path.basename(train_config_file).split('.yaml')[0]
+            model_output_name = model.split("/")[-1]
+            
+            output_dir = f"{work_dir}/ablations/{model_output_name}/{config_name}"
+
+            finetuned_model = env.TrainModel(
+                    Dir(output_dir),
+                    dataset_file, 
+                    CONFIG = os.path.join(env['CONFIGS']['train'], train_config_file),
+                    MODEL=model,
+                    DATASET_NAME=dataset_name,
+                    target_scanner=scan_timestamp # need this so we can track the timestamp of the model output directory
+                )
+            ablations.append(finetuned_model)
+    # print(ablations)
+    env.Alias('ablations', ablations)
+
+
+
+
+
+################ MODEL COMPARISONS ################
 results = []
 for dataset_name, dataset_file in env["DATASETS"].items():
     work_dir = Dir(f"work/{dataset_name}")
@@ -68,7 +107,7 @@ for dataset_name, dataset_file in env["DATASETS"].items():
                 "${WORK}/${DATASET_NAME}.txt",
                 dataset_file,
                 DATASET_NAME=dataset_name,
-                source_scanner=scan_timestamp
+                source_scanner=scan_timestamp,
             )
     
     models = []
