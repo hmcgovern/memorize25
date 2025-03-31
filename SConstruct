@@ -8,46 +8,37 @@ import gzip
 import re
 import functools
 import time
-# import imp
 import sys
 from dirhash import dirhash
 # from steamroller import Environment
 
+# This tells scons to use any activated virtual env rather than a hardcoded path to executables (default)
+os.environ["SCONS_ENABLE_VIRTUALENV"] = "1"
 
-# Variables control various aspects of the experiment.  Note that you have to declare
-# any variables you want to use here, with reasonable default values, but when you want
-# to change/override the default values, do so in the "custom.py" file.
-#
-# Note how, since we expect some of our build rules may want to use GPUs and/or run on
-# a grid, we include a few variables along those lines that can then be overridden in
-# the "custom.py" file and then used when a build rule (like "env.TrainModel") is invoked.
-# Adding some indirection like this allows us finer-grained control using "custom.py",
-# i.e. without having to directly edit this file.
 vars = Variables("custom.py")
-# "meta-llama/Llama-3.1-8B"
-vars.AddVariables(
-    ("MODEL", "", "meta-llama/Llama-3.1-8B"),
-    ("DATASETS", "", {"paradise_lost" : "data/paradise_lost.txt.gz",
-                    # "inferno": "data/dante.txt"
-                      }),
-    ("TRAINED_MODEL", "", "model/checkpoint-160")
-    # ("SLURM_ENGINE", "", "slurm"),
-    # ("CPU_QUEUE", "", "some_queue"),
-    # ("CPU_ACCOUNT", "", "some_account"),    
 
+vars.AddVariables(
+    ("MODELS", "", [
+                    "meta-llama/Llama-3.2-3B",
+                    # "meta-llama/Llama-3.2-3B-Instruct", 
+                    # "bigscience/bloom-3b",
+                    # "openai-community/gpt2-xl",
+                    # "EleutherAI/gpt-neo-1.3B",
+                    # "EleutherAI/gpt-j-6b"
+                    ]),
+    ("DATASETS", "", {"paradise_lost" : "work/paradise_lost/paradise_lost.txt",
+                      }),
+    ("CONFIGS", "", {"train": "configs/train",
+                     "eval": "configs/eval"}),
+    ("ABLATION_DEFAULTS", "", {'model':"meta-llama/Llama-3.2-1B",
+                               'dataset': "work/paradise_lost/paradise_lost.txt",
+                               'dataset_name': 'paradise_lost'}) 
 )
 
 # Methods on the environment object are used all over the place, but it mostly serves to
 # manage the variables (see above) and builders (see below).
 env = Environment(
     variables=vars,
-    
-    # Defining a bunch of builders (none of these do anything except "touch" their targets,
-    # as you can see in the dummy.py script).  Consider in particular the "TrainModel" builder,
-    # which interpolates two variables beyond the standard SOURCES/TARGETS: PARAMETER_VALUE
-    # and MODEL_TYPE.  When we invoke the TrainModel builder (see below), we'll need to pass
-    # in values for these (note that e.g. the existence of a MODEL_TYPES variable above doesn't
-    # automatically populate MODEL_TYPE, we'll do this with for-loops).
     BUILDERS={
         "UnzipData" : Builder(
             action="python3 scripts/unzip.py --input ${SOURCE} --output ${TARGET}"
@@ -56,114 +47,108 @@ env = Environment(
         #     action="python3 scripts/preprocess_data.py --input ${SOURCES[0]} --outputs ${TARGETS[0]}"
         # ),
         "TrainModel" : Builder(
-            action="accelerate launch scripts/train_model.py --model_name ${MODEL} --dataset ${SOURCE} --outputs ${TARGETS[0]}"            
+            action="accelerate launch scripts/train_model.py ${CONFIG} --model_name ${MODEL} --dataset ${SOURCES[0]} --outputs ${TARGETS[0]}"            
         ),
-        "EvalModel" : Builder(
-            action="python3 scripts/eval_model.py --model_or_checkpoint_path ${SOURCES[0]} --test ${SOURCES[1]} --outputs ${TARGETS[0]}"
+        "CleanEval": Builder(
+             action="python3 scripts/clean_eval.py --model ${MODEL} --data ${SOURCES[0]} --output ${TARGETS[0]}"
         ),
-        # "GenerateReport" : Builder(
-        #     action="python scripts/generate_report.py --experimental_results ${SOURCES} --outputs ${TARGETS[0]}"
-        # )
+        # we will need one for splitting the text into scenes
     }
 )
 
-# At this point we have defined all the builders and variables, so it's
-# time to specify the actual experimental process, which will involve
-# running all combinations of datasets, folds, model types, and parameter values,
-# collecting the build artifacts from applying the models to test data in a list.
-#
-# The basic pattern for invoking a build rule is:
-#
-#   "env.Rule(list_of_targets, list_of_sources, VARIABLE1=value, VARIABLE2=value...)"
-#
-# Note how variables can be specified in each invocation, and their values used to fill
-# in the build commands *and* determine output filenames, potentially overriding the global
-# variables at the top of this file.  It's a very flexible system, and there are ways to
-# make it less verbose, but in this case explicit is better than implicit.
-#
-# Note also how the outputs ("targets") from earlier invocation are used as the inputs
-# ("sources") to later ones, and how some outputs are also gathered into the "results"
-# variable, so they can be summarized together after each experiment runs.
-
-# train model is the fine-tuning, and we keep track of ppl on the train set, no need for a dev set
-# apply model is prompting the model with prompts from the test set, tracking generations
-# generate report will calculate various metrics, like verbatim recall. 
-
-
+# this function tells Scons to track the timestamp of the directory rather than content changes (which it can't do for directories), 
+# so  that it can be used as a source or target.
 def dir_timestamp(node, env):
     return os.path.getmtime(node.abspath)
 
+# N.B. we pass this either to source_scanner or target_scanner when source or target is a directory.
+scan_timestamp = Scanner(function=dir_timestamp, skeys=['.'])
+
+################ MODEL ABLATIONS ################
+# conducting a series of tests for 
+
+model = env['ABLATION_DEFAULTS'].get('model', None)
+dataset_file = env['ABLATION_DEFAULTS'].get('dataset', None)
+dataset_name = env['ABLATION_DEFAULTS'].get('dataset_name', None)
+if model != None and dataset_file != None:
+    ablations = []
+    work_dir = Dir(f"work/{dataset_name}")
+
+    for train_config_file in os.listdir(env["CONFIGS"].get('train', [])):
+        if train_config_file.endswith('.yaml'):
+
+            config_name = os.path.basename(train_config_file).split('.yaml')[0]
+            model_output_name = model.split("/")[-1]
+            
+            output_dir = f"{work_dir}/ablations/{model_output_name}/{config_name}"
+
+            finetuned_model = env.TrainModel(
+                    Dir(output_dir),
+                    dataset_file, 
+                    CONFIG = os.path.join(env['CONFIGS']['train'], train_config_file),
+                    MODEL=model,
+                    DATASET_NAME=dataset_name,
+                    target_scanner=scan_timestamp # need this so we can track the timestamp of the model output directory
+                )
+            ablations.append(finetuned_model)
+    # print(ablations)
+    env.Alias('ablations', ablations)
 
 
+
+
+
+################ MODEL COMPARISONS ################
 results = []
 for dataset_name, dataset_file in env["DATASETS"].items():
+    work_dir = Dir(f"work/{dataset_name}")
+    # let's temporarily set an env variable for the work dir so it can be inferred
+    env["WORK"] = work_dir
+
     # if the dataset is gzipped, we need to unzip it first
     if dataset_file.endswith(".gz"):
-        dataset_file = env.UnzipData("work/${DATASET_NAME}/data.txt", dataset_file, DATASET_NAME=dataset_name)
+        dataset_file = env.UnzipData(
+                "${WORK}/${DATASET_NAME}.txt",
+                dataset_file,
+                DATASET_NAME=dataset_name,
+                source_scanner=scan_timestamp,
+            )
+    
+    models = []
+    baselines = []
+    for model in env["MODELS"]:
+        model_output_name = model.split("/")[-1]
+        
+        # first we want to get a baseline -- how well does that model do on paradise lost without any fine-tuning?
+        baseline = env.CleanEval(
+             ["${WORK}/baseline/${MODEL_NAME}_summary.json"],
+             dataset_file,
+             MODEL_NAME=model_output_name,
+             MODEL=model,
+        )
 
+        baselines.append(baseline)
 
-    # model = env.TrainModel(
-    #     ["work/${DATASET_NAME}/model.bin"],
-    #     dataset_file,
-    #     MODEL=env["MODEL"],
-    #     DATASET_NAME=dataset_name,
-    # )
+        # N.B. Dir doesn't seem to work with path interpolation, aka Dir("${WORK}/{MODEL}") won't fill in the variables
+        # need to create a variable with the path first, then pass it
+        output_dir = f"{env['WORK']}/{model}"
+        finetuned_model = env.TrainModel(
+            Dir(output_dir),
+            dataset_file,
+            MODEL=model,
+            DATASET_NAME=dataset_name,
+            target_scanner=scan_timestamp # need this so we can track the timestamp of the model output directory
+        )
 
-    evals = env.EvalModel(
-        "work/${DATASET_NAME}/eval.png",
-        [Dir(env["TRAINED_MODEL"]), dataset_file],
-        DATASET_NAME=dataset_name,
-        target_scanner=Scanner(function=dir_timestamp, skeys=['.'])
-    )
+        models.append(finetuned_model)
+ 
+        finetuned = env.CleanEval(
+            ["${WORK}/finetuned/${MODEL_NAME}_summary.json"],
+            dataset_file,
+            MODEL_NAME=model_output_name,
+            MODEL=finetuned_model,
+        )
+    results.append({dataset_name: models})
 
-    # data = env.PreprocessData("work/${DATASET_NAME}/data.txt", dataset_file, DATASET_NAME=dataset_name)
-    # for fold in range(1, env["FOLDS"] + 1):
-    #     train, dev, test = env.ShuffleData(
-    #         [
-    #             "work/${DATASET_NAME}/${FOLD}/train.txt",
-    #             "work/${DATASET_NAME}/${FOLD}/dev.txt",
-    #             "work/${DATASET_NAME}/${FOLD}/test.txt",
-    #         ],
-    #         data,
-    #         FOLD=fold,
-    #         DATASET_NAME=dataset_name,
-    #         STEAMROLLER_QUEUE=env["CPU_QUEUE"],
-    #         STEAMROLLER_ACCOUNT=env["CPU_ACCOUNT"]
-    #     )
-    #     for model_type in env["MODEL_TYPES"]:
-    #         for parameter_value in env["PARAMETER_VALUES"]:
-    #             #
-    #             # Note how the STEAMROLLER_* variables are specified differently here.
-    #             #
-    #             model = env.TrainModel(
-    #                 "work/${DATASET_NAME}/${FOLD}/${MODEL_TYPE}/${PARAMETER_VALUE}/model.bin",
-    #                 [train, dev],
-    #                 FOLD=fold,
-    #                 DATASET_NAME=dataset_name,
-    #                 MODEL_TYPE=model_type,
-    #                 PARAMETER_VALUE=parameter_value,
-    #                 STEAMROLLER_QUEUE=env["GPU_QUEUE"],
-    #                 STEAMROLLER_ACCOUNT=env["GPU_ACCOUNT"],
-    #                 STEAMROLLER_GPU_COUNT=env["GPU_COUNT"]
-    #             )
-    #             results.append(
-    #                 env.ApplyModel(
-    #                     "work/${DATASET_NAME}/${FOLD}/${MODEL_TYPE}/${PARAMETER_VALUE}/applied.txt",
-    #                     [model, test],
-    #                     FOLD=fold,
-    #                     DATASET_NAME=dataset_name,
-    #                     MODEL_TYPE=model_type,
-    #                     PARAMETER_VALUE=parameter_value,
-    #                     STEAMROLLER_QUEUE=env["CPU_QUEUE"],
-    #                     STEAMROLLER_ACCOUNT=env["CPU_ACCOUNT"]
-    #                 )
-    #             )
-
-# Use the list of applied model outputs to generate an evaluation report (table, plot,
-# f-score, confusion matrix, whatever makes sense).
-# report = env.GenerateReport(
-#     "work/report.txt",
-#     results,
-#     STEAMROLLER_QUEUE=env["CPU_QUEUE"],
-#     STEAMROLLER_ACCOUNT=env["CPU_ACCOUNT"]
-# )
+env.Alias("baseline", baselines)
+env.Alias("train", models)

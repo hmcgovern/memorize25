@@ -1,0 +1,6 @@
+num_eval_samples: 100
+general_domain: "EleutherAI/the_pile_deduplicated"
+chunk_size: 1024 # should be chosen to be around equal with the examples
+num_train_examples: 100
+batch_size: 4
+gradient_accumulation_steps: 1

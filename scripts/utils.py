@@ -72,25 +72,15 @@ def load_tokenizer(llm_model_path):
     tokenizer = AutoTokenizer.from_pretrained(llm_model_path)
     
     if "huggyllama" in llm_model_path:
-        tokenizer.pad_token = "[PAD]"        
+        tokenizer.add_special_tokens({"pad_token": "[PAD]"})        
     else:
-        # pass 
-        # tokenizer.add_special_tokens({"pad_token":"<pad>"})
         if tokenizer.pad_token is None:    
-            tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
+            tokenizer.pad_token = tokenizer.eos_token
     
-    tokenizer.padding_side = "left"
+    if 'llama' in llm_model_path.lower() or 'gpt' in llm_model_path.lower():
+        tokenizer.padding_side = "right"
+    else:
+        tokenizer.padding_side = "left"
+    tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
+    
     return tokenizer
-
-from pynvml import *
-def print_gpu_utilization():
-    nvmlInit()
-    handle = nvmlDeviceGetHandleByIndex(0)
-    info = nvmlDeviceGetMemoryInfo(handle)
-    print(f"GPU memory occupied: {info.used//1024**2} MB.")
-
-
-def print_summary(result):
-    print(f"Time: {result.metrics['train_runtime']:.2f}")
-    print(f"Samples/second: {result.metrics['train_samples_per_second']:.2f}")
-    print_gpu_utilization()
