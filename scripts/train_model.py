@@ -1,6 +1,6 @@
 import argparse
 import datasets
-from transformers import Trainer, TrainerCallback, TrainingArguments, DataCollatorForLanguageModeling
+from transformers import Trainer, TrainerCallback, TrainingArguments, DataCollatorForLanguageModeling, EarlyStoppingCallback
 import os
 import utils
 import evaluate
@@ -149,7 +149,7 @@ def main(args):
     # retrieving some defaults
     batch_size = retrieve('batch_size', 8)
     gradient_accumulation_steps=retrieve('gradient_accumulation_steps', 10)
-    num_train_epochs = retrieve('num_train_epochs', 10)
+    num_train_epochs = retrieve('num_train_epochs', 100)
     eval_steps = calculate_eval_steps(len(tokenized_dataset), 
                                       num_train_epochs, 
                                       batch_size,
@@ -166,6 +166,8 @@ def main(args):
         output_dir=args.outputs[0],
         eval_strategy="steps",  # Evaluate every N steps
         eval_steps=eval_steps,
+        metric_for_best_model = 'perplexity', #the name of the metric returned by compute_metrics we care about for early stopping
+        greater_is_better = False, # we want lower perplexity
         gradient_accumulation_steps=gradient_accumulation_steps,
         eval_accumulation_steps=2,
         save_total_limit=1,
@@ -193,6 +195,7 @@ def main(args):
         eval_dataset=tokenized_dataset.select(range(retrieve('num_eval_samples', 20))),  # Evaluate on a subset of the training data
         data_collator=data_collator,
         compute_metrics=compute_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=2)]
     )
 
     trainer.add_callback(PerplexityCallback())

@@ -9,7 +9,8 @@ import re
 import functools
 import time
 import sys
-# from steamroller import Environment
+from dirhash import dirhash
+from steamroller import Environment
 
 # This tells scons to use any activated virtual env rather than a hardcoded path to executables (default)
 os.environ["SCONS_ENABLE_VIRTUALENV"] = "1"
@@ -18,12 +19,9 @@ vars = Variables("custom.py")
 
 vars.AddVariables(
     ("MODELS", "", [
+                    "meta-llama/Llama-3.2-1B",
                     "meta-llama/Llama-3.2-3B",
-                    # "meta-llama/Llama-3.2-3B-Instruct", 
-                    # "bigscience/bloom-3b",
-                    # "openai-community/gpt2-xl",
-                    # "EleutherAI/gpt-neo-1.3B",
-                    # "EleutherAI/gpt-j-6b"
+                    "meta-llama/Llama-3.1-8B",
                     ]),
     ("DATASETS", "", {"paradise_lost" : "work/paradise_lost/paradise_lost.txt",
                       }),
@@ -32,7 +30,7 @@ vars.AddVariables(
     ("ABLATION_DEFAULTS", "", {'model':"meta-llama/Llama-3.2-1B",
                                'dataset': "work/paradise_lost/paradise_lost.txt",
                                'dataset_name': 'paradise_lost'}),
-    ("BENCHMARK_TASKS", "", ['gsm8k']), 
+    ("BENCHMARK_TASKS", "", ['mmlu']), 
 )
 
 # Methods on the environment object are used all over the place, but it mostly serves to
@@ -72,13 +70,13 @@ scan_timestamp = Scanner(function=dir_timestamp, skeys=['.'])
 model = env['ABLATION_DEFAULTS'].get('model', None)
 dataset_file = env['ABLATION_DEFAULTS'].get('dataset', None)
 dataset_name = env['ABLATION_DEFAULTS'].get('dataset_name', None)
+
 if model != None and dataset_file != None:
     ablations = []
     work_dir = Dir(f"work/{dataset_name}")
 
     for train_config_file in os.listdir(env["CONFIGS"].get('train', [])):
         if train_config_file.endswith('.yaml'):
-
             config_name = os.path.basename(train_config_file).split('.yaml')[0]
             model_output_name = model.split("/")[-1]
             
@@ -92,7 +90,18 @@ if model != None and dataset_file != None:
                     DATASET_NAME=dataset_name,
                     target_scanner=scan_timestamp # need this so we can track the timestamp of the model output directory
                 )
-            ablations.append(finetuned_model)
+
+            metrics = env.CleanEval(
+             "${WORK}/ablations/${MODEL_NAME}/${CONFIG_NAME}/${MODEL_NAME}_summary.json",
+             dataset_file,
+             MODEL_NAME=model_output_name,
+             MODEL=model,
+             CONFIG_NAME=config_name,
+             WORK=work_dir,
+        )
+
+            ablations.append((os.path.join(env['CONFIGS']['train'], train_config_file), finetuned_model, metrics))
+
     env.Alias('ablations', ablations)
 
 
@@ -105,6 +114,7 @@ for dataset_name, dataset_file in env["DATASETS"].items():
     env["WORK"] = work_dir
 
     # if the dataset is gzipped, we need to unzip it first
+    unzipped_data = []
     if dataset_file.endswith(".gz"):
         dataset_file = env.UnzipData(
                 "${WORK}/${DATASET_NAME}.txt",
@@ -112,7 +122,8 @@ for dataset_name, dataset_file in env["DATASETS"].items():
                 DATASET_NAME=dataset_name,
                 source_scanner=scan_timestamp,
             )
-    
+    unzipped_data.append(dataset_file)
+
     finetuned_models = []
     baselines = []
     benchmarks  = []
@@ -204,6 +215,7 @@ for dataset_name, dataset_file in env["DATASETS"].items():
                                    'benchmarks': benchmarks,
                                    'characterizations': characterizations}})
 
+env.Alias("data", unzipped_data)
 env.Alias("train", finetuned_models)
 env.Alias("baseline", baselines)
 env.Alias("benchmark", benchmarks)
