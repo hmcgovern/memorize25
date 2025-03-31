@@ -102,7 +102,7 @@ class WandbTextCompletionCallback(TrainerCallback):
                         rouge_scores.append(self.rouge.score(label_text,pred_text)["rougeL"].fmeasure)
                    
                         sample_logs.append({
-                            "input (first 50 tokens)": self.tokenizer.decode(prompt_inputs[j], skip_special_tokens=True),
+                            f"input (first {self.prompt_length} tokens)": self.tokenizer.decode(prompt_inputs[j], skip_special_tokens=True),
                             "expected continuation": label_text,
                             "generated continuation": pred_text
                         })
@@ -113,8 +113,8 @@ class WandbTextCompletionCallback(TrainerCallback):
                 "eval/exact_match (length-matched)": sum(exact_match_scores) / len(exact_match_scores),
                 "eval/rouge (rougeL)": sum(rouge_scores) / len(rouge_scores),
                 "eval/sample_completions": wandb.Table(
-                    columns=["Input (first 50 tokens)", "Expected Continuation", "Generated Continuation"],
-                    data=[[log["input (first 50 tokens)"], log["expected continuation"], log["generated continuation"]]
+                    columns=[f"Input (first {self.prompt_length} tokens)", "Expected Continuation", "Generated Continuation"],
+                    data=[[log[f"input (first {self.prompt_length} tokens)"], log["expected continuation"], log["generated continuation"]]
                         for log in sample_logs]
                 )
             })

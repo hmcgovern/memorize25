@@ -8,8 +8,11 @@ local
 
 wandb
 work
+external
 */__pycache__/*
 */.ipynb_checkpoints/
 */.pytest
 */.pytest_cache/
 */.vscode/
+*.pyc
+scripts/__pycache__/*

@@ -1,20 +1,26 @@
 import argparse
 import datasets
-from transformers import Trainer, TrainerCallback, TrainingArguments, DataCollatorForLanguageModeling
+from transformers import Trainer, TrainerCallback, TrainingArguments, DataCollatorForLanguageModeling, EarlyStoppingCallback
 import os
 import utils
 import evaluate
 import torch
 from peft import get_peft_model, LoraConfig
 import numpy as np
-from utils import print_gpu_utilization, print_summary
+from pynvml import *
 import wandb
 import gc
+import yaml
+import sys
+import os
+
+from utils import print_gpu_utilization, print_summary
+from callbacks import *
+from itertools import islice
 
 gc.collect()
 torch.cuda.empty_cache()
 torch.cuda.reset_peak_memory_stats()
-
 
 
 os.environ["WANDB_PROJECT"] = "LLM Memorization"
@@ -143,7 +149,7 @@ def main(args):
     # retrieving some defaults
     batch_size = retrieve('batch_size', 8)
     gradient_accumulation_steps=retrieve('gradient_accumulation_steps', 10)
-    num_train_epochs = retrieve('num_train_epochs', 10)
+    num_train_epochs = retrieve('num_train_epochs', 100)
     eval_steps = calculate_eval_steps(len(tokenized_dataset), 
                                       num_train_epochs, 
                                       batch_size,
@@ -157,11 +163,22 @@ def main(args):
   
     # if lora: gradient_accumulation_steps=1 and gradient_checkpointing=False
     training_args = TrainingArguments(
+        output_dir=args.outputs[0],
+        eval_strategy="steps",  # Evaluate every N steps
+        eval_steps=eval_steps,
+        metric_for_best_model = 'perplexity', #the name of the metric returned by compute_metrics we care about for early stopping
+        greater_is_better = False, # we want lower perplexity
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        eval_accumulation_steps=2,
+        save_total_limit=1,
         save_steps=10,
         report_to="wandb",
         save_strategy="steps",
         logging_dir="./logs",
         logging_steps=10,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=2,
+        num_train_epochs=num_train_epochs,  # Train until very low perplexity
         optim="adamw_8bit", #quantized optimizer
         remove_unused_columns=False,
         bf16=True,
@@ -174,7 +191,11 @@ def main(args):
     trainer = Trainer(
         model=model,
         args=training_args,
+        train_dataset=tokenized_dataset, 
+        eval_dataset=tokenized_dataset.select(range(retrieve('num_eval_samples', 20))),  # Evaluate on a subset of the training data
+        data_collator=data_collator,
         compute_metrics=compute_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=2)]
     )
 
     trainer.add_callback(PerplexityCallback())
@@ -203,13 +224,14 @@ if __name__ == "__main__":
     args, rest = parser.parse_known_args()
 
     # Load YAML config if provided
-    with open(rest[0], "r") as f:
-        yaml_config = yaml.safe_load(f)
+    if len(rest) > 0:
+        with open(rest[0], "r") as f:
+            yaml_config = yaml.safe_load(f)
 
-    # Override argparse defaults with YAML values
-    for key, value in yaml_config.items():
-        if hasattr(args, key):
-            setattr(args, key, value)
+        # Override argparse defaults with YAML values
+        for key, value in yaml_config.items():
+            if hasattr(args, key):
+                setattr(args, key, value)
 
     main(args)
 
