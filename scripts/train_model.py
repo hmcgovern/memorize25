@@ -14,26 +14,13 @@ import yaml
 import sys
 import os
 
+from utils import print_gpu_utilization, print_summary
 from callbacks import *
-
 from itertools import islice
-
 
 gc.collect()
 torch.cuda.empty_cache()
 torch.cuda.reset_peak_memory_stats()
-
-def print_gpu_utilization():
-    nvmlInit()
-    handle = nvmlDeviceGetHandleByIndex(0)
-    info = nvmlDeviceGetMemoryInfo(handle)
-    print(f"GPU memory occupied: {info.used//1024**2} MB.")
-
-
-def print_summary(result):
-    print(f"Time: {result.metrics['train_runtime']:.2f}")
-    print(f"Samples/second: {result.metrics['train_samples_per_second']:.2f}")
-    print_gpu_utilization()
 
 
 os.environ["WANDB_PROJECT"] = "LLM Memorization"
@@ -234,13 +221,14 @@ if __name__ == "__main__":
     args, rest = parser.parse_known_args()
 
     # Load YAML config if provided
-    with open(rest[0], "r") as f:
-        yaml_config = yaml.safe_load(f)
+    if len(rest) > 0:
+        with open(rest[0], "r") as f:
+            yaml_config = yaml.safe_load(f)
 
-    # Override argparse defaults with YAML values
-    for key, value in yaml_config.items():
-        if hasattr(args, key):
-            setattr(args, key, value)
+        # Override argparse defaults with YAML values
+        for key, value in yaml_config.items():
+            if hasattr(args, key):
+                setattr(args, key, value)
 
     main(args)
 

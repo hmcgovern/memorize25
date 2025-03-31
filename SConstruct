@@ -31,7 +31,8 @@ vars.AddVariables(
                      "eval": "configs/eval"}),
     ("ABLATION_DEFAULTS", "", {'model':"meta-llama/Llama-3.2-1B",
                                'dataset': "work/paradise_lost/paradise_lost.txt",
-                               'dataset_name': 'paradise_lost'}) 
+                               'dataset_name': 'paradise_lost'}),
+    ("BENCHMARK_TASKS", "", ['gsm8k']), 
 )
 
 # Methods on the environment object are used all over the place, but it mostly serves to
@@ -48,7 +49,12 @@ env = Environment(
         "CleanEval": Builder(
              action="python3 scripts/clean_eval.py --model ${MODEL} --data ${SOURCES[0]} --output ${TARGETS[0]}"
         ),
-        # we will need one for splitting the text into scenes
+        "BenchmarkModel": Builder(
+            action="python3 scripts/llm_benchmark.py --model ${MODEL} --tokenizer ${TOK} --task ${TASK} --output ${TARGET}"
+        ),
+        "Characterize": Builder(
+            action="python3 scripts/characterize_memorization.py --input ${SOURCES[0]} --dataset ${SOURCES[1]} --output ${TARGET}"
+        ),
     }
 )
 
@@ -87,18 +93,15 @@ if model != None and dataset_file != None:
                     target_scanner=scan_timestamp # need this so we can track the timestamp of the model output directory
                 )
             ablations.append(finetuned_model)
-    # print(ablations)
     env.Alias('ablations', ablations)
 
 
 
-
-
-################ MODEL COMPARISONS ################
+################ MAIN EXPERIMENTS ################
 results = []
 for dataset_name, dataset_file in env["DATASETS"].items():
     work_dir = Dir(f"work/{dataset_name}")
-    # let's temporarily set an env variable for the work dir so it can be inferred
+
     env["WORK"] = work_dir
 
     # if the dataset is gzipped, we need to unzip it first
@@ -110,24 +113,52 @@ for dataset_name, dataset_file in env["DATASETS"].items():
                 source_scanner=scan_timestamp,
             )
     
-    models = []
+    finetuned_models = []
     baselines = []
+    benchmarks  = []
+    characterizations = []
     for model in env["MODELS"]:
         model_output_name = model.split("/")[-1]
         
-        # first we want to get a baseline -- how well does that model do on paradise lost without any fine-tuning?
-        baseline = env.CleanEval(
+        # How well can the base model recite?
+        baseline_metrics = env.CleanEval(
              ["${WORK}/baseline/${MODEL_NAME}_summary.json"],
              dataset_file,
              MODEL_NAME=model_output_name,
              MODEL=model,
         )
 
-        baselines.append(baseline)
+        baselines.append(baseline_metrics)
+
+        # How can we characterize the generated text from the base model?
+        bs_char = env.Characterize(
+            "${WORK}/baseline/${MODEL_NAME}_characterization.json",
+            [baseline_metrics, dataset_file],
+            MODEL_NAME=model_output_name
+        )
+        characterizations.append(bs_char)
+        
+
+        # N.B. Not needed (at least not always needed) as they publish these evals on hf datsets
+        # # What are the (general) benchmark capabilities of the base model?
+        for task in env["BENCHMARK_TASKS"]:
+            baseline_benchmark = env.BenchmarkModel(
+                "${WORK}/baseline/${MODEL_NAME}_${TASK}_benchmark.json",
+                source=None,
+                MODEL=model,
+                TOK=model,
+                MODEL_NAME=model_output_name,
+                TASK=task,
+            )
+            benchmarks.append(baseline_benchmark)
+
+      
 
         # N.B. Dir doesn't seem to work with path interpolation, aka Dir("${WORK}/{MODEL}") won't fill in the variables
         # need to create a variable with the path first, then pass it
-        output_dir = f"{env['WORK']}/{model}"
+        
+        # finetune the base model on the text
+        output_dir = f"{work_dir}/{model}"
         finetuned_model = env.TrainModel(
             Dir(output_dir),
             dataset_file,
@@ -136,15 +167,46 @@ for dataset_name, dataset_file in env["DATASETS"].items():
             target_scanner=scan_timestamp # need this so we can track the timestamp of the model output directory
         )
 
-        models.append(finetuned_model)
+        finetuned_models.append(finetuned_model)
  
-        finetuned = env.CleanEval(
+        # How well can the finetuned model recite?
+        finetuned_metrics = env.CleanEval(
             ["${WORK}/finetuned/${MODEL_NAME}_summary.json"],
             dataset_file,
             MODEL_NAME=model_output_name,
             MODEL=finetuned_model,
         )
-    results.append({dataset_name: models})
+        baselines.append(finetuned_metrics)
 
+         # How can we characterize the generated text from the base model?
+        ft_char = env.Characterize(
+            "${WORK}/finetuned/${MODEL_NAME}_characterization.json",
+            [finetuned_metrics, dataset_file],
+            MODEL_NAME=model_output_name
+        )
+        characterizations.append(ft_char)
+
+        # What are the (general) benchmark capabilities of the finetuned model?
+        for task in env["BENCHMARK_TASKS"]:
+            finetuned_benchmark = env.BenchmarkModel(
+                "${WORK}/finetuned/${MODEL_NAME}_${TASK}_benchmark.json",
+                source=None,
+                MODEL=finetuned_model,
+                TOK=model,
+                MODEL_NAME=model_output_name,
+                TASK=task
+            )
+            benchmarks.append(finetuned_benchmark)
+
+        
+    results.append({dataset_name: {'models': finetuned_models,
+                                   'metrics': baselines,
+                                   'benchmarks': benchmarks,
+                                   'characterizations': characterizations}})
+
+env.Alias("train", finetuned_models)
 env.Alias("baseline", baselines)
-env.Alias("train", models)
+env.Alias("benchmark", benchmarks)
+env.Alias("char", characterizations)
+
+# env.Alias("all", results)

@@ -1,1 +1,8 @@
-# override construction variables here
+STEAMROLLER_ENGINE = "slurm"
+# STEAMROLLER_CPU_QUEUE = "some_queue"
+# STEAMROLLER_CPU_ACCOUNT = "some_account"
+STEAMROLLER_QUEUE =  "ampere"
+STEAMROLLER_GPU_ACCOUNT =  "CAINES-SL3-GPU"
+STEAMROLLER_GPU_COUNT = 4
+STEAMROLLER_TIME = "00:30:00"
+

@@ -2,7 +2,7 @@
 # source: https://github.com/minyoungg/platonic-rep/blob/main/models.py
 import torch
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer, AutoConfig, AutoModelForSeq2SeqLM
-
+import os
 
 def auto_determine_dtype():
     """ automatic dtype setting. override this if you want to force a specific dtype """
@@ -86,6 +86,31 @@ def load_tokenizer(llm_model_path):
     return tokenizer
 
 
-
-            
+def get_latest_checkpoint(model_dir):
+    """Finds the latest checkpoint folder in the given model directory."""
+    # TODO: include a check to see if it's a valid directory in the first place, want it
+    # to be compatible with hf repos
+    checkpoint_dirs = [
+        d for d in os.listdir(model_dir) if d.startswith("checkpoint-") and d[len("checkpoint-"):].isdigit()
+    ]
     
+    if not checkpoint_dirs:
+        raise ValueError(f"No valid checkpoint found in {model_dir}")
+
+    # Sort checkpoints by number (e.g., 'checkpoint-100' -> 100)
+    latest_checkpoint = max(checkpoint_dirs, key=lambda x: int(x.split("-")[-1]))
+
+    return os.path.join(model_dir, latest_checkpoint)
+         
+
+def print_gpu_utilization():
+    nvmlInit()
+    handle = nvmlDeviceGetHandleByIndex(0)
+    info = nvmlDeviceGetMemoryInfo(handle)
+    print(f"GPU memory occupied: {info.used//1024**2} MB.")
+
+
+def print_summary(result):
+    print(f"Time: {result.metrics['train_runtime']:.2f}")
+    print(f"Samples/second: {result.metrics['train_samples_per_second']:.2f}")
+    print_gpu_utilization()
