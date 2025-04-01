@@ -103,6 +103,7 @@ def get_latest_checkpoint(model_dir):
     return os.path.join(model_dir, latest_checkpoint)
          
 
+from pynvml import *
 def print_gpu_utilization():
     nvmlInit()
     handle = nvmlDeviceGetHandleByIndex(0)

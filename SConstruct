@@ -9,8 +9,8 @@ import re
 import functools
 import time
 import sys
-from dirhash import dirhash
-from steamroller import Environment
+# from dirhash import dirhash
+# from steamroller import Environment
 
 # This tells scons to use any activated virtual env rather than a hardcoded path to executables (default)
 os.environ["SCONS_ENABLE_VIRTUALENV"] = "1"
@@ -57,7 +57,7 @@ env = Environment(
 )
 
 # this function tells Scons to track the timestamp of the directory rather than content changes (which it can't do for directories), 
-# so  that it can be used as a source or target.
+# so that a directory can be used as a source or target.
 def dir_timestamp(node, env):
     return os.path.getmtime(node.abspath)
 
@@ -80,7 +80,7 @@ if model != None and dataset_file != None:
             config_name = os.path.basename(train_config_file).split('.yaml')[0]
             model_output_name = model.split("/")[-1]
             
-            output_dir = f"{work_dir}/ablations/{model_output_name}/{config_name}"
+            output_dir = f"{work_dir}/ablations/{config_name}/{model}/"
 
             finetuned_model = env.TrainModel(
                     Dir(output_dir),
@@ -90,15 +90,14 @@ if model != None and dataset_file != None:
                     DATASET_NAME=dataset_name,
                     target_scanner=scan_timestamp # need this so we can track the timestamp of the model output directory
                 )
-
             metrics = env.CleanEval(
-             "${WORK}/ablations/${MODEL_NAME}/${CONFIG_NAME}/${MODEL_NAME}_summary.json",
+             "${WORK}/ablations/${CONFIG_NAME}/${MODEL_NAME}_summary.json",
              dataset_file,
              MODEL_NAME=model_output_name,
-             MODEL=model,
+             MODEL=finetuned_model,
              CONFIG_NAME=config_name,
              WORK=work_dir,
-        )
+            )
 
             ablations.append((os.path.join(env['CONFIGS']['train'], train_config_file), finetuned_model, metrics))
 

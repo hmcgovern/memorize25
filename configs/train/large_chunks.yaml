@@ -1,3 +1,4 @@
 chunk_size: 1024
 batch_size: 4
 gradient_accumulation_steps: 20
+num_train_epochs: 50

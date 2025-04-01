@@ -168,10 +168,11 @@ def main(args):
         eval_steps=eval_steps,
         metric_for_best_model = 'perplexity', #the name of the metric returned by compute_metrics we care about for early stopping
         greater_is_better = False, # we want lower perplexity
+        load_best_model_at_end=True,
         gradient_accumulation_steps=gradient_accumulation_steps,
         eval_accumulation_steps=2,
         save_total_limit=1,
-        save_steps=10,
+        save_steps=eval_steps,
         report_to="wandb",
         save_strategy="steps",
         logging_dir="./logs",
