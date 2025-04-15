@@ -3,6 +3,7 @@
 import torch
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoTokenizer, AutoConfig, AutoModelForSeq2SeqLM
 import os
+from pynvml import *
 
 def auto_determine_dtype():
     """ automatic dtype setting. override this if you want to force a specific dtype """

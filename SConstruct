@@ -9,17 +9,15 @@ import re
 import functools
 import time
 import sys
-from dirhash import dirhash
+# from dirhash import dirhash
 from steamroller import Environment
 
-# This tells scons to use any activated virtual env rather than a hardcoded path to executables (default)
-os.environ["SCONS_ENABLE_VIRTUALENV"] = "1"
 
 vars = Variables("custom.py")
 
 vars.AddVariables(
     ("MODELS", "", [
-                    "meta-llama/Llama-3.2-1B",
+                    # "meta-llama/Llama-3.2-1B",
                     "meta-llama/Llama-3.2-3B",
                     "meta-llama/Llama-3.1-8B",
                     ]),
@@ -31,6 +29,7 @@ vars.AddVariables(
                                'dataset': "work/paradise_lost/paradise_lost.txt",
                                'dataset_name': 'paradise_lost'}),
     ("BENCHMARK_TASKS", "", ['mmlu']), 
+    ("BEST_TRAIN_CONFIG", "", "configs/train/small_chunks.yaml")
 )
 
 # Methods on the environment object are used all over the place, but it mostly serves to
@@ -104,7 +103,7 @@ if model != None and dataset_file != None:
 
     env.Alias('ablations', ablations)
 
-
+print(f"SCons is using virtualenv found at {Virtualenv()}")
 
 ################ MAIN EXPERIMENTS ################
 results = []
@@ -173,6 +172,7 @@ for dataset_name, dataset_file in env["DATASETS"].items():
         finetuned_model = env.TrainModel(
             Dir(output_dir),
             dataset_file,
+            CONFIG=env["BEST_TRAIN_CONFIG"],
             MODEL=model,
             DATASET_NAME=dataset_name,
             target_scanner=scan_timestamp # need this so we can track the timestamp of the model output directory

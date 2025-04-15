@@ -19,8 +19,9 @@ from callbacks import *
 from itertools import islice
 
 gc.collect()
-torch.cuda.empty_cache()
-torch.cuda.reset_peak_memory_stats()
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
 
 
 os.environ["WANDB_PROJECT"] = "LLM Memorization"
@@ -32,9 +33,9 @@ def retrieve(attr, default):
 
 
 def main(args):
-
-    torch.cuda.empty_cache()
-    print_gpu_utilization()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print_gpu_utilization()
     
     with open(args.dataset, "r") as f:
         input_text = f.read()
@@ -88,12 +89,12 @@ def main(args):
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
 
-    device = torch.device("cuda")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
     model.train()
 
-    
-    print_gpu_utilization()
+    if torch.cuda.is_available():
+        print_gpu_utilization()
 
 
     data_collator = DataCollatorForLanguageModeling(
@@ -166,7 +167,7 @@ def main(args):
         output_dir=args.outputs[0],
         eval_strategy="steps",  # Evaluate every N steps
         eval_steps=eval_steps,
-        metric_for_best_model = 'perplexity', #the name of the metric returned by compute_metrics we care about for early stopping
+        metric_for_best_model = 'perplexity', # the name of the metric returned by compute_metrics we care about for early stopping
         greater_is_better = False, # we want lower perplexity
         gradient_accumulation_steps=gradient_accumulation_steps,
         eval_accumulation_steps=2,
@@ -184,6 +185,7 @@ def main(args):
         bf16=True,
         gradient_checkpointing=False,
         run_name=args.run_name,
+        load_best_model_at_end=True,
     )
 
     wandb.init(project="LLM-Memorization", name=f"finetune-{args.model_name}")
@@ -199,10 +201,11 @@ def main(args):
     )
 
     trainer.add_callback(PerplexityCallback())
-    trainer.add_callback(WandbTextCompletionCallback(trainer = trainer, tokenizer=tok,eval_dataset=tokenized_dataset.select(range(10))))
+    trainer.add_callback(WandbTextCompletionCallback(trainer = trainer, tokenizer=tok, eval_dataset=tokenized_dataset.select(range(10))))
     model.train()
     result = trainer.train()
-    print_summary(result)
+    if torch.cuda.is_available():
+        print_summary(result)
 
     
 if __name__ == "__main__":
