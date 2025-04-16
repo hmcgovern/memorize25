@@ -59,6 +59,7 @@ def evaluate_model(args):
 
     # Load model and tokenizer
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     if len(args.model.split('/')) > 2:
         tokenizer_path = "/".join(args.model.split('/')[-2:])
     else:
