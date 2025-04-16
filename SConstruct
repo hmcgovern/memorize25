@@ -64,7 +64,7 @@ def dir_timestamp(node, env):
 scan_timestamp = Scanner(function=dir_timestamp, skeys=['.'])
 
 ################ MODEL ABLATIONS ################
-# conducting a series of tests for 
+# to run ablations: `scons ablations`
 
 model = env['ABLATION_DEFAULTS'].get('model', None)
 dataset_file = env['ABLATION_DEFAULTS'].get('dataset', None)
